@@ -1,0 +1,191 @@
+esphome:
+  name: qtpy-psram
+  friendly_name: QTPY_Temp_Hum
+
+esp32:
+  board: adafruit_qtpy_esp32s3_nopsram
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: ""
+
+ota:
+  - platform: esphome
+    password: ""
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Qtpy-Psram-Test01"
+    password: ""
+
+captive_portal:
+
+i2c:
+  - id: i2c_bus
+    sda: GPIO41
+    scl: GPIO40
+    scan: true
+  #  frequency: 100khz  
+
+# Hold GPIO38 HIGH at all times 
+switch:
+  - platform: gpio
+    id: gpio38_hold_high
+    internal: true
+    pin: GPIO38
+    restore_mode: ALWAYS_ON
+    entity_category: config
+    icon: mdi:flash
+
+#QTPY ESP32 S3-NoPSRAM GRB Onboard LED config 
+light:
+  - platform: esp32_rmt_led_strip
+    rgb_order: GRB
+    pin: GPIO39
+    num_leds: 1
+    chipset: WS2812
+    is_rgbw: false
+    id: qtpy_led
+    name: "Light"
+    icon: "mdi:led-outline"
+    effects:
+      - random:
+      - flicker:
+      - addressable_rainbow:
+
+# Sensors
+sensor:
+  # SCD4X CO2, Temperature, Humidity sensor
+  - platform: scd4x
+    co2:
+      name: "CO2"
+      id: co2_sensor
+      accuracy_decimals: 0
+    temperature:
+      name: "Temperature"
+      id: temperature_sensor
+      accuracy_decimals: 1
+      filters:
+        - lambda: return x * (9.0/5.0) + 32.0;  # Convert to Fahrenheit
+      unit_of_measurement: "°F"
+    humidity:
+      name: "Humidity"
+      id: humidity_sensor
+      accuracy_decimals: 1
+    update_interval: 5s
+
+
+  # PMSA003I particulate sensor (more data exposed)
+  - platform: pmsa003i
+    i2c_id: i2c_bus
+    setup_priority: -100
+    address: 0x12
+    update_interval: 15s
+
+    # Mass concentrations (µg/m³)
+    pm_1_0:
+      name: "PM1.0"
+      id: pm_1_0_sensor
+    pm_2_5:
+      name: "PM2.5"
+      id: pm_2_5_sensor
+    pm_10_0:
+      name: "PM10.0"
+      id: pm_10_0_sensor
+
+    # Number concentrations (counts per 0.1 L of air)
+    pmc_0_3:
+      name: "PMC0.3"
+      id: pmc_0_3_sensor
+    pmc_0_5:
+      name: "PMC0.5"
+      id: pmc_0_5_sensor
+    pmc_1_0:
+      name: "PMC1.0"
+      id: pmc_1_0_sensor
+    pmc_2_5:
+      name: "PMC2.5"
+      id: pmc_2_5_sensor
+    pmc_5_0:
+      name: "PMC5.0"
+      id: pmc_5_0_sensor
+    pmc_10_0:
+      name: "PMC10.0"
+      id: pmc_10_0_sensor
+
+  # Derived US EPA AQI from PM2.5 
+  - platform: template
+    name: "PM2.5 AQI (US EPA)"
+    id: pm25_aqi
+    unit_of_measurement: "AQI"
+    icon: mdi:weather-hazy
+    update_interval: 10s
+    lambda: |-
+      float c = id(pm_2_5_sensor).state;
+      if (isnan(c)) return NAN;
+
+      // Truncate to 1 decimal as per EPA guidance
+      c = floorf(c * 10.0f) / 10.0f;
+
+      // Breakpoints (PM2.5 µg/m³)
+      struct BP { float Cl, Ch, Il, Ih; };
+      BP bp;
+
+      if      (c <= 12.0f)              bp = {  0.0f,  12.0f,   0.0f,  50.0f };
+      else if (c <= 35.4f)              bp = { 12.1f,  35.4f,  51.0f, 100.0f };
+      else if (c <= 55.4f)              bp = { 35.5f,  55.4f, 101.0f, 150.0f };
+      else if (c <= 150.4f)             bp = { 55.5f, 150.4f, 151.0f, 200.0f };
+      else if (c <= 250.4f)             bp = {150.5f, 250.4f, 201.0f, 300.0f };
+      else if (c <= 350.4f)             bp = {250.5f, 350.4f, 301.0f, 400.0f };
+      else if (c <= 500.4f)             bp = {350.5f, 500.4f, 401.0f, 500.0f };
+      else return 500.0f;  // Above index max
+
+      // Linear mapping
+      return (bp.Ih - bp.Il) * (c - bp.Cl) / (bp.Ch - bp.Cl) + bp.Il;
+
+  # WiFi Signal Strength
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_sensor
+    update_interval: 60s
+
+  # Uptime sensor
+  - platform: uptime
+    name: "Uptime"
+    id: uptime_sensor
+
+# Text sensors 
+text_sensor:
+  # AQI category text mapped from the numeric AQI
+  - platform: template
+    name: "Air Quality Category"
+    id: aqi_text
+    update_interval: 10s
+    lambda: |-
+      float aqi = id(pm25_aqi).state;
+      if (isnan(aqi)) return std::string("Unknown");
+      if (aqi <=  50.0f)  return std::string("Good");
+      if (aqi <= 100.0f)  return std::string("Moderate");
+      if (aqi <= 150.0f)  return std::string("Unhealthy for Sensitive Groups");
+      if (aqi <= 200.0f)  return std::string("Unhealthy");
+      if (aqi <= 300.0f)  return std::string("Very Unhealthy");
+      return std::string("Hazardous");
+
+  # Device info
+  - platform: version
+    name: "ESPHome Version"
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+    ssid:
+      name: "Connected SSID"
